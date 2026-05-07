@@ -16,12 +16,9 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
     """
     Create a new job.
 
-    PostgreSQL automatically generates a unique job ID
-    because id is SERIAL / primary key in the jobs table.
-
-    Success: 200
-    Bad request: 400
-    Database/server error: 500
+    New jobs are created with:
+    status = active
+    is_deleted = False
     """
 
     try:
@@ -30,12 +27,12 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
             location=job.location,
             issue=job.issue,
             priority=job.priority,
+            status="active",
+            is_deleted=False
         )
 
         db.add(new_job)
         db.commit()
-
-        # Get auto-generated ID from PostgreSQL
         db.refresh(new_job)
 
         return {
@@ -48,6 +45,7 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
                 "issue": new_job.issue,
                 "priority": new_job.priority,
                 "status": new_job.status,
+                "is_deleted": new_job.is_deleted,
                 "created_at": new_job.created_at,
                 "updated_at": new_job.updated_at,
             },
@@ -70,11 +68,27 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
 
 @router.get("/jobs/")
 def get_all_jobs(db: Session = Depends(get_db)):
+    """
+    Fetch only active dashboard jobs.
+
+    This hides:
+    - cancelled jobs
+    - soft deleted jobs
+    """
+
     try:
-        jobs = db.query(models.Job).order_by(models.Job.id.desc()).all()
+        jobs = (
+            db.query(models.Job)
+            .filter(
+                models.Job.is_deleted == False,
+                models.Job.status == "active"
+            )
+            .order_by(models.Job.id.desc())
+            .all()
+        )
 
         return {
-            "message": "Jobs fetched successfully",
+            "message": "Active jobs fetched successfully",
             "count": len(jobs),
             "jobs": jobs,
         }
@@ -88,8 +102,21 @@ def get_all_jobs(db: Session = Depends(get_db)):
 
 @router.get("/jobs/{job_id}")
 def get_job_by_id(job_id: int, db: Session = Depends(get_db)):
+    """
+    Fetch one job by ID.
+
+    Deleted jobs will not be returned.
+    """
+
     try:
-        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        job = (
+            db.query(models.Job)
+            .filter(
+                models.Job.id == job_id,
+                models.Job.is_deleted == False
+            )
+            .first()
+        )
 
         if not job:
             raise HTTPException(
@@ -99,7 +126,17 @@ def get_job_by_id(job_id: int, db: Session = Depends(get_db)):
 
         return {
             "message": "Job fetched successfully",
-            "job": job,
+            "job": {
+                "id": job.id,
+                "customer_name": job.customer_name,
+                "location": job.location,
+                "issue": job.issue,
+                "priority": job.priority,
+                "status": job.status,
+                "is_deleted": job.is_deleted,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            },
         }
 
     except HTTPException:
@@ -113,9 +150,32 @@ def get_job_by_id(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/jobs/{job_id}")
-def update_job(job_id: int, job_data: schemas.JobCreate, db: Session = Depends(get_db)):
+def update_job(
+    job_id: int,
+    job_data: schemas.JobUpdate,
+    db: Session = Depends(get_db)
+):
+    """
+    Update job details.
+
+    This updates only job details:
+    - customer_name
+    - location
+    - issue
+    - priority
+
+    It does not update status.
+    """
+
     try:
-        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        job = (
+            db.query(models.Job)
+            .filter(
+                models.Job.id == job_id,
+                models.Job.is_deleted == False
+            )
+            .first()
+        )
 
         if not job:
             raise HTTPException(
@@ -133,7 +193,18 @@ def update_job(job_id: int, job_data: schemas.JobCreate, db: Session = Depends(g
 
         return {
             "message": "Job updated successfully",
-            "job": job,
+            "job_id": job.id,
+            "job": {
+                "id": job.id,
+                "customer_name": job.customer_name,
+                "location": job.location,
+                "issue": job.issue,
+                "priority": job.priority,
+                "status": job.status,
+                "is_deleted": job.is_deleted,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            },
         }
 
     except HTTPException:
@@ -146,11 +217,33 @@ def update_job(job_id: int, job_data: schemas.JobCreate, db: Session = Depends(g
             detail="Database error occurred while updating job"
         )
 
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error occurred while updating job"
+        )
 
-@router.delete("/jobs/{job_id}")
-def delete_job(job_id: int, db: Session = Depends(get_db)):
+
+@router.put("/jobs/{job_id}/cancel")
+def cancel_job(job_id: int, db: Session = Depends(get_db)):
+    """
+    Cancel selected job.
+
+    This updates status to cancelled in PostgreSQL.
+    It does not permanently delete the job.
+    Cancelled jobs will not show in GET /jobs/.
+    """
+
     try:
-        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        job = (
+            db.query(models.Job)
+            .filter(
+                models.Job.id == job_id,
+                models.Job.is_deleted == False
+            )
+            .first()
+        )
 
         if not job:
             raise HTTPException(
@@ -158,14 +251,96 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
                 detail="Job not found"
             )
 
-        deleted_job_id = job.id
+        if job.status == "cancelled":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Job is already cancelled"
+            )
 
-        db.delete(job)
+        job.status = "cancelled"
+
         db.commit()
+        db.refresh(job)
 
         return {
-            "message": "Job deleted successfully",
-            "deleted_job_id": deleted_job_id,
+            "message": "Job cancelled successfully",
+            "job_id": job.id,
+            "job": {
+                "id": job.id,
+                "customer_name": job.customer_name,
+                "location": job.location,
+                "issue": job.issue,
+                "priority": job.priority,
+                "status": job.status,
+                "is_deleted": job.is_deleted,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            },
+        }
+
+    except HTTPException:
+        raise
+
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error occurred while cancelling job"
+        )
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error occurred while cancelling job"
+        )
+
+
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: int, db: Session = Depends(get_db)):
+    """
+    Soft delete selected job.
+
+    This does not permanently delete the job from PostgreSQL.
+    It only changes is_deleted from False to True.
+    Deleted jobs will not show in GET /jobs/.
+    """
+
+    try:
+        job = (
+            db.query(models.Job)
+            .filter(
+                models.Job.id == job_id,
+                models.Job.is_deleted == False
+            )
+            .first()
+        )
+
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Job not found"
+            )
+
+        job.is_deleted = True
+
+        db.commit()
+        db.refresh(job)
+
+        return {
+            "message": "Job removed from active dashboard successfully",
+            "deleted_job_id": job.id,
+            "job": {
+                "id": job.id,
+                "customer_name": job.customer_name,
+                "location": job.location,
+                "issue": job.issue,
+                "priority": job.priority,
+                "status": job.status,
+                "is_deleted": job.is_deleted,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            },
         }
 
     except HTTPException:
@@ -176,4 +351,11 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error occurred while deleting job"
+        )
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error occurred while deleting job"
         )
