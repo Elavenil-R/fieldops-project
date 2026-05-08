@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from starlette import status
 
 from app.database import Base, engine
-from app.routes import jobs
+from app.routes import jobs, technicians
 from app import models
 
 
@@ -39,6 +39,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 Base.metadata.create_all(bind=engine)
 
 app.include_router(jobs.router)
+app.include_router(technicians.router)
 
 
 @app.get("/")

@@ -11,7 +11,7 @@ router = APIRouter(
 )
 
 
-@router.post("/jobs/", status_code=status.HTTP_200_OK)
+@router.post("/jobs", status_code=status.HTTP_200_OK)
 def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
     """
     Create a new job.
@@ -30,7 +30,7 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
             location=job.location,
             issue=job.issue,
             priority=job.priority,
-            status="active"
+            status=job.status
         )
 
         db.add(new_job)
@@ -69,7 +69,7 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
         )
 
 
-@router.get("/jobs/")
+@router.get("/jobs")
 def get_all_jobs(db: Session = Depends(get_db)):
     try:
         jobs = db.query(models.Job).order_by(models.Job.id.desc()).all()
